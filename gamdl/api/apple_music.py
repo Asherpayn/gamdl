@@ -92,34 +92,48 @@ class AppleMusicApi:
                     status_code=response.status_code if response is not None else None,
                 )
 
-        index_js_uri_match = re.search(
+        # Try to find a JWT directly in the homepage first (Apple sometimes inlines it)
+        token_match = re.search(r'eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+', home_page)
+        if token_match:
+            return token_match.group(0)
+
+        # Fall back to fetching JS bundles and searching for the token there
+        js_uri_patterns = [
             r"/(assets/index-legacy[~-][^/\"]+\.js)",
-            home_page,
-        )
-        if not index_js_uri_match:
-            raise GamdlApiResponseError(
-                "Error finding index.js URI in Apple Music homepage"
-            )
-        index_js_uri = index_js_uri_match.group(1)
+            r"/(assets/index[~-][^/\"]+\.js)",
+            r"/(assets/[^/\"]*index[^/\"]*\.js)",
+        ]
+        index_js_uri = None
+        for pattern in js_uri_patterns:
+            m = re.search(pattern, home_page)
+            if m:
+                index_js_uri = m.group(1)
+                break
 
-        response = None
-        async with httpx.AsyncClient(follow_redirects=True) as client:
-            try:
-                response = await client.get(
-                    f"{APPLE_MUSIC_HOMEPAGE_URL}/{index_js_uri}"
-                )
-                response.raise_for_status()
-                index_js_page = response.text
-            except httpx.HTTPError:
-                raise GamdlApiResponseError(
-                    "Error fetching index.js page",
-                    status_code=response.status_code if response is not None else None,
-                )
+        js_uris_to_try = (
+            [index_js_uri] if index_js_uri else []
+        ) + [
+            uri.lstrip("/")
+            for uri in re.findall(r'src="(/assets/[^"]+\.js)"', home_page)
+        ]
 
-        token_match = re.search('(?=eyJh)(.*?)(?=")', index_js_page)
-        if not token_match:
+        token = None
+        for uri in js_uris_to_try:
+            response = None
+            async with httpx.AsyncClient(follow_redirects=True) as client:
+                try:
+                    response = await client.get(f"{APPLE_MUSIC_HOMEPAGE_URL}/{uri}")
+                    response.raise_for_status()
+                    js_page = response.text
+                except httpx.HTTPError:
+                    continue
+            token_match = re.search(r'eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+', js_page)
+            if token_match:
+                token = token_match.group(0)
+                break
+
+        if not token:
             raise GamdlApiResponseError("Error finding token in index.js page")
-        token = token_match.group(1)
 
         log.debug("success")
 
